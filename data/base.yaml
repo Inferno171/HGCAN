@@ -1,0 +1,73 @@
+# ============================================================
+# HGCAN — base configuration (used by build_cache.py and train.py)
+# ============================================================
+
+paths:
+  # Dataset roots: each contains <assembly_id>/assembly.json + <body_uuid>.step
+  dataset_roots:
+    - "D:/Bits_course/Dis/Dataset/Fusion360/a1.0.0_00"
+    - "D:/Bits_course/Dis/Dataset/Fusion360/a1.0.0_01"
+    - "D:/Bits_course/Dis/Dataset/Fusion360/a1.0.0_02"
+    - "D:/Bits_course/Dis/Dataset/Fusion360/a1.0.0_03"
+    - "D:/Bits_course/Dis/Dataset/Fusion360/a1.0.0_04"
+    - "D:/Bits_course/Dis/Dataset/Fusion360/a1.0.0_05"
+    - "D:/Bits_course/Dis/Dataset/Fusion360/a1.0.0_06"
+    - "D:/Bits_course/Dis/Dataset/Fusion360/a1.0.0_07"
+    - "D:/Bits_course/Dis/Dataset/Fusion360/a1.0.0_08"
+    - "D:/Bits_course/Dis/Dataset/Fusion360/a1.0.0_09"
+    - "D:/Bits_course/Dis/Dataset/Fusion360/a1.0.0_10"
+
+  cache_bodies:   "cache/bodies"      # <body_uuid>.pt   (occwl graphs; extracted once)
+  cache_assembly: "cache/assembly"    # <assembly_id>.pt (AssemblyPairData)
+  reports:        "reports"           # per-assembly reports + aggregate_summary.json
+  checkpoints:    "checkpoints"
+  # Official dataset train/test split (any shard's copy lists the full dataset).
+  # If set and present, train.py uses a 3-way split: official test held out,
+  # val carved from official train. Blank -> random split.
+  split_json:     "D:/Bits_course/Dis/Dataset/Fusion360/a1.0.0_00/train_test.json"
+
+scan:
+  keep_jointless_as_negatives: false  # true -> also cache jointless assemblies
+
+candidates:
+  knn_k: 8
+  easy_per_positive: 3
+
+build:
+  num_workers: 8
+  skip_existing: true
+
+model:
+  entity_emb: 64
+  entity_layers: 2
+  context_layers: 2
+  heads: 4
+  dropout: 0.1
+  pair_hidden: 128
+  use_cad_features: true    # explicit CAD pair features (axis angle, radius, holes).
+                            # set false for the base-vs-CAD ablation.
+
+train:
+  epochs: 40
+  lr: 3.0e-4
+  weight_decay: 1.0e-5
+  lambda_type: 1.0          # weight on the type-classification loss
+  lambda_dof: 0.2           # DOF auxiliary regularizer weight (0 to ablate)
+  # Hierarchical type: predict n_rot & n_trans (DOF), map to type; the 7-way head
+  # breaks the Cylindrical/PinSlot (1,1) tie. When true, DOF heads train at full
+  # weight. false -> flat 7-way head. This is the Option-5 ablation switch.
+  use_hierarchical_type: false
+  # --- decoupled class-imbalance handling ---
+  class_weights: "sqrt"            # type head: "sqrt" (tempered) | "linear" | "none"
+  max_class_weight: 10.0           # cap on any single type weight
+  # detection pos_weight trades precision<->recall. The full-data confusion matrix
+  # showed the model over-predicts NoJoint at pw=1.0, so we up-weight positives.
+  # "auto" = neg/pos (~3.7 here) counters NoJoint dominance; tune the THRESHOLD
+  # (sweep_threshold.py) on top to pick the final operating point.
+  existence_pos_weight: "auto"     # "auto" (neg/pos) | 1.0 | "none" | <float>
+  max_existence_pos_weight: 5.0    # cap (auto ~3.7 passes through)
+  existence_threshold: 0.5         # start; sweep 0.1-0.8 after training
+  val_frac: 0.2
+  seed: 42
+  device: "cuda"            # falls back to cpu automatically
+  grad_clip: 5.0
