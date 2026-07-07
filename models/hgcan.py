@@ -56,3 +56,20 @@ class HGCAN(nn.Module):
         ng = getattr(data, "node_geom", None)
         nh = getattr(data, "node_hole", None)
         return self.head(h_occ, data.pair_index, node_geom=ng, node_hole=nh)
+
+    @torch.no_grad()
+    def embed(self, data):
+        """Return per-BODY embeddings at both levels, for visualization:
+          h_geom    [N, emb]  Level-1: pooled entity (face/edge) embedding, geometry only
+          h_context [N, emb]  Level-2: after the context GNN sees the neighbourhood
+        Separate from forward() so it never affects training/ablation runs.
+        """
+        num_occ = int(data.num_occ) if not torch.is_tensor(data.num_occ) \
+            else int(data.num_occ.sum())
+        h_ent = self.encoder(data.x_ent.float(), data.ent_edge_index, data.ent_edge_type)
+        h_geom = pool_to_occ(h_ent, data.ent_to_occ, num_occ)      # Level-1 (pure geometry)
+        h = h_geom
+        if hasattr(data, "node_hole") and data.node_hole is not None:
+            h = self.hole_fuse(torch.cat([h, data.node_hole.float()], dim=-1))
+        h_context = self.context(h, data.asm_edge_index, data.asm_edge_type)  # Level-2
+        return h_geom, h_context
