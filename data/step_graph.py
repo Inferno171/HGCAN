@@ -42,9 +42,10 @@ import numpy as np
 import torch
 from torch_geometric.data import Data
 
-from occwl.compound import Compound
-from occwl.graph import face_adjacency
-from occwl.edge_data_extractor import EdgeDataExtractor, EdgeConvexity
+# NOTE: occwl is imported LAZILY (inside the functions that build graphs), NOT at
+# module level. This lets the cached .pt objects — whose class lives in the data
+# package — be UNPICKLED on machines without occwl (e.g. Kaggle), where only the
+# already-built cache is used and no geometry is extracted.
 
 ZERO3 = np.zeros(3, np.float32)
 
@@ -69,11 +70,18 @@ CURVE_TO_IDX = {c: i for i, c in enumerate(CURVE_TYPES)}
 # ---- edge-type relations ----
 REL_CONVEX, REL_CONCAVE, REL_SMOOTH, REL_INCIDENCE = 0, 1, 2, 3
 NUM_RELATIONS = 4
-CONVEXITY_TO_REL = {
-    EdgeConvexity.CONVEX: REL_CONVEX,
-    EdgeConvexity.CONCAVE: REL_CONCAVE,
-    EdgeConvexity.SMOOTH: REL_SMOOTH,
-}
+
+
+def _convexity_to_rel():
+    """Lazy map occwl EdgeConvexity -> relation int. Only called during extraction."""
+    from occwl.edge_data_extractor import EdgeConvexity
+    return {
+        EdgeConvexity.CONVEX: REL_CONVEX,
+        EdgeConvexity.CONCAVE: REL_CONCAVE,
+        EdgeConvexity.SMOOTH: REL_SMOOTH,
+    }
+
+
 SMOOTH_TOL_RADS = 0.0872   # ~5 deg dihedral -> smooth/tangent
 
 # ---- feature layout ----
@@ -260,6 +268,9 @@ def _edge_face_map(faces):
 # ============================================================ main builder
 def solid_to_graph(shape) -> Data:
     """occwl Solid/Shell/Compound -> heterogeneous PyG Data (faces + edges)."""
+    from occwl.graph import face_adjacency
+    from occwl.edge_data_extractor import EdgeDataExtractor
+    convexity_to_rel = _convexity_to_rel()
     try:
         nxg = face_adjacency(shape, self_loops=False)
     except RuntimeError as e:
@@ -306,7 +317,7 @@ def solid_to_graph(shape) -> Data:
             # -> degrade that edge's convexity to SMOOTH (neutral) and continue.
             try:
                 ext = EdgeDataExtractor(attrs["edge"], [faces[i], faces[j]], num_samples=10)
-                r = (CONVEXITY_TO_REL[ext.edge_convexity(SMOOTH_TOL_RADS)]
+                r = (convexity_to_rel[ext.edge_convexity(SMOOTH_TOL_RADS)]
                      if ext.good else REL_SMOOTH)
             except Exception:
                 r = REL_SMOOTH
@@ -410,6 +421,7 @@ def _merge_graphs(graphs):
 
 def step_to_graph(step_path: str) -> Data:
     """One <guid>.step -> heterogeneous PyG Data. All solids kept as islands."""
+    from occwl.compound import Compound
     comp = Compound.load_from_step(str(step_path))
     if comp is None:
         raise StepGraphError("STEP read failed")
