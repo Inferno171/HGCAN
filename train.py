@@ -168,6 +168,10 @@ def main():
                     help="override train.use_hierarchical_type (on|off)")
     ap.add_argument("--tag", default=None,
                     help="label appended to checkpoint/log filenames (keeps ablation runs separate)")
+    ap.add_argument("--focal-gamma", type=float, default=None,
+                    help="override train.focal_gamma (0=weighted CE, >0=focal loss)")
+    ap.add_argument("--patience", type=int, default=None,
+                    help="override train.early_stop_patience (0=off)")
     args = ap.parse_args()
 
     import yaml
@@ -178,6 +182,10 @@ def main():
         cfg["model"]["use_cad_features"] = (args.use_cad == "on")
     if args.use_hierarchical is not None:
         tc["use_hierarchical_type"] = (args.use_hierarchical == "on")
+    if args.focal_gamma is not None:
+        tc["focal_gamma"] = args.focal_gamma
+    if args.patience is not None:
+        tc["early_stop_patience"] = args.patience
     device = tc["device"] if torch.cuda.is_available() else "cpu"
     torch.manual_seed(tc["seed"])
 
@@ -235,6 +243,12 @@ def main():
     else:
         print("[mode] FLAT 7-way type head")
     epochs = args.epochs or tc["epochs"]
+    focal_gamma = float(tc.get("focal_gamma", 0.0))     # 0 = weighted CE; >0 = focal loss
+    patience = int(tc.get("early_stop_patience", 0))    # 0 = off; N = stop after N no-improve
+    if focal_gamma > 0:
+        print(f"[mode] FOCAL type loss (gamma={focal_gamma})")
+    if patience > 0:
+        print(f"[mode] EARLY STOPPING on val_loss_total (patience={patience})")
 
     # per-run suffix so ablation runs don't overwrite each other's outputs.
     # auto-derives from the toggles if --tag not given: e.g. cad1_hier0
@@ -244,6 +258,8 @@ def main():
     ckpt_dir.mkdir(parents=True, exist_ok=True)
     log = ckpt_dir / f"train_log_{suffix}.jsonl"
     best_f1 = -1.0
+    best_val_loss = float("inf")
+    no_improve = 0
     best_path = ckpt_dir / f"best_{suffix}.pt"
     print(f"[run] tag={suffix}  ->  {best_path.name}, {log.name}")
 
@@ -258,7 +274,8 @@ def main():
             exist_logit, type_logits, rot_logits, trans_logits = model(d)
             loss, parts = hgcan_loss(exist_logit, type_logits, rot_logits, trans_logits,
                                      d.pair_label, type_weights=tw, exist_pos_weight=epw,
-                                     lambda_type=lam_type, lambda_dof=lam_dof)
+                                     lambda_type=lam_type, lambda_dof=lam_dof,
+                                     focal_gamma=focal_gamma)
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), clip)
             opt.step()
@@ -287,6 +304,17 @@ def main():
             best_f1 = ex["exist_F1"]
             torch.save(model.state_dict(), best_path)
             print(f"  [checkpoint] new best F1={best_f1:.3f} -> {best_path.name}")
+
+        # early stopping on val total loss (patience-based; adapts per run)
+        if patience > 0:
+            if vloss["total"] < best_val_loss - 1e-4:
+                best_val_loss = vloss["total"]; no_improve = 0
+            else:
+                no_improve += 1
+                if no_improve >= patience:
+                    print(f"  [early stop] val_loss_total no improvement for {patience} "
+                          f"epochs (best={best_val_loss:.3f}); stopping at epoch {ep}.")
+                    break
 
     print(f"[done] best val existence F1 = {best_f1:.3f}  ({best_path})")
     print(f"[done] log in {log}")
