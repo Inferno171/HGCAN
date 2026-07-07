@@ -53,6 +53,9 @@ train:
   weight_decay: 1.0e-5
   lambda_type: 1.0          # weight on the type-classification loss
   lambda_dof: 0.2           # DOF auxiliary regularizer weight (0 to ablate)
+  # --- type-loss imbalance + overfitting controls ---
+  focal_gamma: 0.0          # 0 = weighted CE; >0 (e.g. 2.0) = focal loss on the type head
+  early_stop_patience: 8    # stop if val_loss_total hasn't improved for N epochs (0 = off)
   # Hierarchical type: predict n_rot & n_trans (DOF), map to type; the 7-way head
   # breaks the Cylindrical/PinSlot (1,1) tie. When true, DOF heads train at full
   # weight. false -> flat 7-way head. This is the Option-5 ablation switch.
