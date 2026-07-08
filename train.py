@@ -162,6 +162,8 @@ def main():
     ap.add_argument("--config", default="configs/base.yaml")
     ap.add_argument("--limit", type=int, default=0)
     ap.add_argument("--epochs", type=int, default=0)
+    ap.add_argument("--split-encoders", choices=["on", "off"], default=None,
+                    help="override model.split_type_encoders (on|off)")
     ap.add_argument("--use-cad", choices=["on", "off"], default=None,
                     help="override model.use_cad_features (on|off)")
     ap.add_argument("--use-hierarchical", choices=["on", "off"], default=None,
@@ -180,6 +182,8 @@ def main():
     # CLI overrides so one config file serves all ablation runs (handy on Kaggle)
     if args.use_cad is not None:
         cfg["model"]["use_cad_features"] = (args.use_cad == "on")
+    if args.split_encoders is not None:
+        cfg["model"]["split_type_encoders"] = (args.split_encoders == "on")
     if args.use_hierarchical is not None:
         tc["use_hierarchical_type"] = (args.use_hierarchical == "on")
     if args.focal_gamma is not None:
