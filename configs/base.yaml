@@ -46,6 +46,8 @@ model:
   pair_hidden: 128
   use_cad_features: true    # explicit CAD pair features (axis angle, radius, holes).
                             # set false for the base-vs-CAD ablation.
+  split_type_encoders: false # type-specific Face/Edge input MLPs (same hetero graph).
+                            # set true for the split-encoder ablation.
 
 train:
   epochs: 40
