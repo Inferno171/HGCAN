@@ -112,6 +112,8 @@ def main():
     ap.add_argument("--thresholds", default="0.1,0.2,0.3,0.4,0.5,0.6,0.7,0.8")
     ap.add_argument("--confusion", type=float, default=None,
                     help="also print full confusion matrix at this threshold")
+    ap.add_argument("--split-encoders", choices=["on", "off"], default=None,
+                    help="override model.split_type_encoders (on|off)")
     ap.add_argument("--use-cad", choices=["on", "off"], default=None,
                     help="MUST match how the checkpoint was trained (architecture)")
     ap.add_argument("--use-hierarchical", choices=["on", "off"], default=None,
@@ -124,6 +126,8 @@ def main():
     # on a param-count mismatch (CAD features change the head input width).
     if args.use_cad is not None:
         cfg["model"]["use_cad_features"] = (args.use_cad == "on")
+    if args.split_encoders is not None:
+        cfg["model"]["split_type_encoders"] = (args.split_encoders == "on")
     if args.use_hierarchical is not None:
         cfg["train"]["use_hierarchical_type"] = (args.use_hierarchical == "on")
     device = cfg["train"]["device"] if torch.cuda.is_available() else "cpu"
