@@ -31,6 +31,7 @@ class HGCAN(nn.Module):
             in_dim, emb=emb, layers=cfg_model["entity_layers"],
             heads=cfg_model["heads"], dropout=cfg_model["dropout"],
             num_relations=NUM_ENTITY_RELATIONS, rel_emb=rel_emb,
+            split_type_encoders=cfg_model.get("split_type_encoders", False),
         )
         # fuse pooled node embedding with per-body hole features -> emb
         self.hole_fuse = nn.Sequential(
@@ -45,14 +46,22 @@ class HGCAN(nn.Module):
                              dropout=cfg_model["dropout"],
                              use_cad=cfg_model.get("use_cad_features", True))
 
-    def forward(self, data):
+    def _h_occ(self, data):
+        """Shared trunk: entities -> pooled bodies -> hole fusion -> context."""
         num_occ = int(data.num_occ) if not torch.is_tensor(data.num_occ) \
             else int(data.num_occ.sum())
-        h_ent = self.encoder(data.x_ent.float(), data.ent_edge_index, data.ent_edge_type)
-        h_occ = pool_to_occ(h_ent, data.ent_to_occ, num_occ)
+        nt = getattr(data, "node_type", None)
+        h_ent = self.encoder(data.x_ent.float(), data.ent_edge_index,
+                             data.ent_edge_type, node_type=nt)
+        h_geom = pool_to_occ(h_ent, data.ent_to_occ, num_occ)
+        h = h_geom
         if hasattr(data, "node_hole") and data.node_hole is not None:
-            h_occ = self.hole_fuse(torch.cat([h_occ, data.node_hole.float()], dim=-1))
-        h_occ = self.context(h_occ, data.asm_edge_index, data.asm_edge_type)
+            h = self.hole_fuse(torch.cat([h, data.node_hole.float()], dim=-1))
+        h_context = self.context(h, data.asm_edge_index, data.asm_edge_type)
+        return h_geom, h_context
+
+    def forward(self, data):
+        _, h_occ = self._h_occ(data)
         ng = getattr(data, "node_geom", None)
         nh = getattr(data, "node_hole", None)
         return self.head(h_occ, data.pair_index, node_geom=ng, node_hole=nh)
@@ -64,12 +73,21 @@ class HGCAN(nn.Module):
           h_context [N, emb]  Level-2: after the context GNN sees the neighbourhood
         Separate from forward() so it never affects training/ablation runs.
         """
-        num_occ = int(data.num_occ) if not torch.is_tensor(data.num_occ) \
-            else int(data.num_occ.sum())
-        h_ent = self.encoder(data.x_ent.float(), data.ent_edge_index, data.ent_edge_type)
-        h_geom = pool_to_occ(h_ent, data.ent_to_occ, num_occ)      # Level-1 (pure geometry)
-        h = h_geom
-        if hasattr(data, "node_hole") and data.node_hole is not None:
-            h = self.hole_fuse(torch.cat([h, data.node_hole.float()], dim=-1))
-        h_context = self.context(h, data.asm_edge_index, data.asm_edge_type)  # Level-2
-        return h_geom, h_context
+        return self._h_occ(data)
+
+    @torch.no_grad()
+    def embed_pairs(self, data):
+        """Return per-PAIR representations for visualizing the TYPE-DECISION space:
+          feat   [P, in_feat]  input pair features (learned [3*emb+2] + CAD if enabled)
+          hidden [P, hidden]   after head.shared = the space the type head linearly
+                               classifies; if types separate anywhere, it is here.
+        Pairs follow data.pair_index; labels are data.pair_label (0=NoJoint, 1..7).
+        """
+        _, h_occ = self._h_occ(data)
+        if data.pair_index.numel() == 0:
+            z = h_occ.new_zeros
+            return z((0, 1)), z((0, 1))
+        ng = getattr(data, "node_geom", None)
+        nh = getattr(data, "node_hole", None)
+        return self.head.pair_representation(h_occ, data.pair_index,
+                                             node_geom=ng, node_hole=nh)
