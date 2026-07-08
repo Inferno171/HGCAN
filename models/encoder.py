@@ -48,14 +48,29 @@ class RelGATv2(nn.Module):
 
 class EntityEncoder(nn.Module):
     def __init__(self, in_dim, emb=64, layers=2, heads=4, dropout=0.1,
-                 num_relations=4, rel_emb=16):
+                 num_relations=4, rel_emb=16, split_type_encoders=False):
         super().__init__()
-        self.inp = nn.Sequential(nn.Linear(in_dim, emb), nn.ReLU(), nn.Linear(emb, emb))
+        self.split = split_type_encoders
+        if self.split:
+            # type-specific input encoders: faces and edges have different feature
+            # semantics (surf-type block vs curve-type block), so each gets its own
+            # projection into the SAME hidden space; the heterogeneous graph and
+            # incidence message passing above are unchanged.
+            self.inp_face = nn.Sequential(nn.Linear(in_dim, emb), nn.ReLU(), nn.Linear(emb, emb))
+            self.inp_edge = nn.Sequential(nn.Linear(in_dim, emb), nn.ReLU(), nn.Linear(emb, emb))
+        else:
+            self.inp = nn.Sequential(nn.Linear(in_dim, emb), nn.ReLU(), nn.Linear(emb, emb))
         self.gnn = RelGATv2(emb, layers, heads, dropout, num_relations, rel_emb)
         self.emb = emb
 
-    def forward(self, x_ent, ent_edge_index, ent_edge_type):
-        h = self.inp(x_ent)
+    def forward(self, x_ent, ent_edge_index, ent_edge_type, node_type=None):
+        if self.split and node_type is not None:
+            is_edge = (node_type == 1).unsqueeze(-1)
+            h = torch.where(is_edge, self.inp_edge(x_ent), self.inp_face(x_ent))
+        elif self.split:
+            h = self.inp_face(x_ent)     # split requested but node_type missing: degrade gracefully
+        else:
+            h = self.inp(x_ent)
         return self.gnn(h, ent_edge_index, ent_edge_type)
 
 
