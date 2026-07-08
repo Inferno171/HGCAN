@@ -87,18 +87,26 @@ class PairHead(nn.Module):
         self.rot_head = nn.Linear(hidden, N_ROT_CLASSES)
         self.trans_head = nn.Linear(hidden, N_TRANS_CLASSES)
 
-    def forward(self, h_occ, pair_index, node_geom=None, node_hole=None):
-        if pair_index.numel() == 0:
-            z = h_occ.new_zeros
-            return (z((0,)), z((0, NUM_JOINT_TYPES)),
-                    z((0, N_ROT_CLASSES)), z((0, N_TRANS_CLASSES)))
+    def pair_representation(self, h_occ, pair_index, node_geom=None, node_hole=None):
+        """Build the pair encoding the heads actually see.
+        Returns (feat, hidden):
+          feat   [P, in_feat]  input pair features (learned + optional CAD)
+          hidden [P, hidden]   after the shared MLP = the TYPE-DECISION SPACE
+        Used by forward() and by plot_pair_embeddings.py."""
         i, j = pair_index[0], pair_index[1]
         feat = learned_pair_features(h_occ[i], h_occ[j])
         if self.use_cad and node_geom is not None and node_hole is not None:
             cad = cad_pair_features(node_geom[i].float(), node_geom[j].float(),
                                     node_hole[i].float(), node_hole[j].float())
             feat = torch.cat([feat, cad], dim=-1)
-        s = self.shared(feat)
+        return feat, self.shared(feat)
+
+    def forward(self, h_occ, pair_index, node_geom=None, node_hole=None):
+        if pair_index.numel() == 0:
+            z = h_occ.new_zeros
+            return (z((0,)), z((0, NUM_JOINT_TYPES)),
+                    z((0, N_ROT_CLASSES)), z((0, N_TRANS_CLASSES)))
+        _, s = self.pair_representation(h_occ, pair_index, node_geom, node_hole)
         return (self.exist_head(s).squeeze(-1),
                 self.type_head(s),
                 self.rot_head(s),
