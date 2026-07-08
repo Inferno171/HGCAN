@@ -160,6 +160,8 @@ def main():
     ap.add_argument("--split", default="val", choices=["train", "val", "test"])
     ap.add_argument("--color-by", default="joint_type",
                     choices=["joint_type", "participation", "has_axis", "holes"])
+    ap.add_argument("--split-encoders", choices=["on", "off"], default=None,
+                    help="override model.split_type_encoders (on|off)")
     ap.add_argument("--use-cad", choices=["on", "off"], default=None,
                     help="MUST match how the checkpoint was trained")
     ap.add_argument("--use-hierarchical", choices=["on", "off"], default=None)
@@ -179,6 +181,8 @@ def main():
     cfg = yaml.safe_load(open(args.config))
     if args.use_cad is not None:
         cfg["model"]["use_cad_features"] = (args.use_cad == "on")
+    if args.split_encoders is not None:
+        cfg["model"]["split_type_encoders"] = (args.split_encoders == "on")
     if args.use_hierarchical is not None:
         cfg["train"]["use_hierarchical_type"] = (args.use_hierarchical == "on")
     device = cfg["train"]["device"] if torch.cuda.is_available() else "cpu"
