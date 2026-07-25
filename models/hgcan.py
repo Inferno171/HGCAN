@@ -12,6 +12,13 @@ Nodes are B-Rep bodies. Relations used at both levels: entity edge_type
 (convexity/incidence) and assembly asm_edge_type (contact/knn/same-occurrence).
 Hole features (per body) are fused onto the node before context propagation, so a
 part's hole geometry can inform "does this hole fit that part's shaft".
+
+REVISION B (optional, off by default): when model.entity_type_head is true, the
+PRE-POOL entity matrix is additionally routed to a cross-body attention module
+that emits a DELTA on the pooled type logits. The delta is gated by a zero-init
+scalar, so at initialisation the network is bit-for-bit the pooled baseline and
+the ablation is a clean A/B. The pooled path -- existence, DOF, CAD features --
+is untouched.
 """
 import torch
 import torch.nn as nn
@@ -19,6 +26,7 @@ import torch.nn as nn
 from models.encoder import EntityEncoder, pool_to_occ
 from models.context_gnn import ContextGNN
 from models.head import PairHead
+from models.entity_type_head import EntityCrossAttention
 from models.constants import NUM_ENTITY_RELATIONS, NUM_ASM_RELATIONS, HOLE_DIM
 
 
@@ -46,8 +54,24 @@ class HGCAN(nn.Module):
                              dropout=cfg_model["dropout"],
                              use_cad=cfg_model.get("use_cad_features", True))
 
-    def _h_occ(self, data):
-        """Shared trunk: entities -> pooled bodies -> hole fusion -> context."""
+        # ---- Revision B: entity-level type path (opt-in) ----
+        self.entity_type = None
+        if cfg_model.get("entity_type_head", False):
+            self.entity_type = EntityCrossAttention(
+                emb=emb,
+                proj=cfg_model.get("entity_proj", emb),
+                topk=cfg_model.get("entity_topk", 48),
+                dropout=cfg_model["dropout"],
+            )
+        # aux payload from the most recent forward(), consumed by the anchor
+        # losses in train.py. Stashed rather than returned so forward() keeps its
+        # 4-tuple contract (evaluate(), sweep_threshold.py, predict.py all rely
+        # on it). Safe because training runs one assembly per step.
+        self.last_entity_aux = None
+
+    def _trunk(self, data):
+        """entities -> pooled bodies -> hole fusion -> context.
+        Returns (h_ent, h_geom, h_context); h_ent is the PRE-POOL entity matrix."""
         num_occ = int(data.num_occ) if not torch.is_tensor(data.num_occ) \
             else int(data.num_occ.sum())
         nt = getattr(data, "node_type", None)
@@ -58,13 +82,31 @@ class HGCAN(nn.Module):
         if hasattr(data, "node_hole") and data.node_hole is not None:
             h = self.hole_fuse(torch.cat([h, data.node_hole.float()], dim=-1))
         h_context = self.context(h, data.asm_edge_index, data.asm_edge_type)
+        return h_ent, h_geom, h_context
+
+    def _h_occ(self, data):
+        """Body-level embeddings only. Kept at 2 return values so embed() and
+        embed_pairs() -- and plot_embeddings.py -- are unaffected."""
+        _, h_geom, h_context = self._trunk(data)
         return h_geom, h_context
 
     def forward(self, data):
-        _, h_occ = self._h_occ(data)
+        self.last_entity_aux = None                  # never reuse a stale payload
+        h_ent, _, h_occ = self._trunk(data)
         ng = getattr(data, "node_geom", None)
         nh = getattr(data, "node_hole", None)
-        return self.head(h_occ, data.pair_index, node_geom=ng, node_hole=nh)
+        exist_logit, type_logits, rot_logits, trans_logits = self.head(
+            h_occ, data.pair_index, node_geom=ng, node_hole=nh)
+
+        if self.entity_type is not None and data.pair_index.numel():
+            num_occ = int(data.num_occ) if not torch.is_tensor(data.num_occ) \
+                else int(data.num_occ.sum())
+            delta, aux = self.entity_type(h_ent, data.ent_to_occ, num_occ,
+                                          data.pair_index)
+            type_logits = type_logits + delta
+            self.last_entity_aux = aux
+
+        return exist_logit, type_logits, rot_logits, trans_logits
 
     @torch.no_grad()
     def embed(self, data):
