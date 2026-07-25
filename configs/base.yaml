@@ -44,10 +44,14 @@ model:
   heads: 4
   dropout: 0.1
   pair_hidden: 128
-  use_cad_features: true    # explicit CAD pair features (axis angle, radius, holes).
-                            # set false for the base-vs-CAD ablation.
-  split_type_encoders: false # type-specific Face/Edge input MLPs (same hetero graph).
-                            # set true for the split-encoder ablation.
+  # --- Revision B: entity-level type head (cross-body attention) ---
+  # false = pooled baseline (Revision A), behaviour identical to before.
+  # true  = keep the PRE-POOL entity matrix for the TYPE decision and add a
+  #         zero-gated delta to the pooled type logits. Existence/DOF/CAD path
+  #         is untouched. Override per-run with --type-head pooled|entity.
+  entity_type_head: false
+  entity_topk: 48           # max entities kept per body -> S is at most 48x48
+  entity_proj: 64           # projection width inside the cross-attention
 
 train:
   epochs: 40
@@ -55,13 +59,13 @@ train:
   weight_decay: 1.0e-5
   lambda_type: 1.0          # weight on the type-classification loss
   lambda_dof: 0.2           # DOF auxiliary regularizer weight (0 to ablate)
-  # --- type-loss imbalance + overfitting controls ---
-  focal_gamma: 0.0          # 0 = weighted CE; >0 (e.g. 2.0) = focal loss on the type head
-  early_stop_patience: 8    # stop if val_loss_total hasn't improved for N epochs (0 = off)
-  # Hierarchical type: predict n_rot & n_trans (DOF), map to type; the 7-way head
-  # breaks the Cylindrical/PinSlot (1,1) tie. When true, DOF heads train at full
-  # weight. false -> flat 7-way head. This is the Option-5 ablation switch.
-  use_hierarchical_type: false
+  # --- entity-level auxiliaries (only active when model.entity_type_head) ---
+  # anchor: multi-positive CE on the cross-body matrix S toward the recorded
+  #   joint anchor cells (already in the cache; nothing to rebuild).
+  # saliency: BCE teaching the top-k selector to RETAIN anchor entities --
+  #   without it, top-k is non-differentiable and anchor coverage is luck.
+  lambda_anchor: 0.5
+  lambda_saliency: 0.2
   # --- decoupled class-imbalance handling ---
   class_weights: "sqrt"            # type head: "sqrt" (tempered) | "linear" | "none"
   max_class_weight: 10.0           # cap on any single type weight
