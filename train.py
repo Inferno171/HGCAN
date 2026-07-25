@@ -26,6 +26,7 @@ sys.path.insert(0, str(ROOT))
 from data.dataset import HGCANCache, split_ids, official_splits
 from models.hgcan import HGCAN
 from models.losses import hgcan_loss
+from models.anchor_loss import entity_aux_losses
 from models.constants import JOINT_TYPES_K1, JOINT_TYPES_7, NUM_CLASSES, NUM_JOINT_TYPES, hierarchical_type_pred
 
 
@@ -174,6 +175,13 @@ def main():
                     help="override train.focal_gamma (0=weighted CE, >0=focal loss)")
     ap.add_argument("--patience", type=int, default=None,
                     help="override train.early_stop_patience (0=off)")
+    ap.add_argument("--type-head", choices=["pooled", "entity"], default=None,
+                    help="pooled = Revision A baseline; entity = cross-body "
+                         "entity attention + anchor supervision on the TYPE head")
+    ap.add_argument("--lambda-anchor", type=float, default=None,
+                    help="override train.lambda_anchor (entity head only)")
+    ap.add_argument("--lambda-saliency", type=float, default=None,
+                    help="override train.lambda_saliency (entity head only)")
     args = ap.parse_args()
 
     import yaml
@@ -190,6 +198,12 @@ def main():
         tc["focal_gamma"] = args.focal_gamma
     if args.patience is not None:
         tc["early_stop_patience"] = args.patience
+    if args.type_head is not None:
+        cfg["model"]["entity_type_head"] = (args.type_head == "entity")
+    if args.lambda_anchor is not None:
+        tc["lambda_anchor"] = args.lambda_anchor
+    if args.lambda_saliency is not None:
+        tc["lambda_saliency"] = args.lambda_saliency
     device = tc["device"] if torch.cuda.is_available() else "cpu"
     torch.manual_seed(tc["seed"])
 
@@ -253,11 +267,23 @@ def main():
         print(f"[mode] FOCAL type loss (gamma={focal_gamma})")
     if patience > 0:
         print(f"[mode] EARLY STOPPING on val_loss_total (patience={patience})")
+    # --- entity-level type head (Revision B) ---
+    entity_head = bool(cfg["model"].get("entity_type_head", False))
+    lam_anchor = float(tc.get("lambda_anchor", 0.5))
+    lam_sal = float(tc.get("lambda_saliency", 0.2))
+    if entity_head:
+        print(f"[mode] ENTITY type head (topk={cfg['model'].get('entity_topk', 48)}, "
+              f"proj={cfg['model'].get('entity_proj', 64)}, "
+              f"lambda_anchor={lam_anchor}, lambda_saliency={lam_sal})")
+        print("[mode]   gate is zero-init: at epoch 0 this is EXACTLY the pooled baseline")
+    else:
+        print("[mode] POOLED type head (Revision A baseline)")
 
     # per-run suffix so ablation runs don't overwrite each other's outputs.
     # auto-derives from the toggles if --tag not given: e.g. cad1_hier0
     suffix = args.tag or f"cad{int(cfg['model'].get('use_cad_features', True))}" \
-                          f"_hier{int(tc.get('use_hierarchical_type', False))}"
+                          f"_hier{int(tc.get('use_hierarchical_type', False))}" \
+                          f"_ent{int(entity_head)}"
     ckpt_dir = ROOT / cfg["paths"]["checkpoints"]
     ckpt_dir.mkdir(parents=True, exist_ok=True)
     log = ckpt_dir / f"train_log_{suffix}.jsonl"
@@ -280,6 +306,15 @@ def main():
                                      d.pair_label, type_weights=tw, exist_pos_weight=epw,
                                      lambda_type=lam_type, lambda_dof=lam_dof,
                                      focal_gamma=focal_gamma)
+            # entity-level auxiliaries (no-op when the entity head is off:
+            # model.last_entity_aux stays None and this returns None)
+            aux_loss, aux_parts = entity_aux_losses(
+                d, model.last_entity_aux,
+                lambda_anchor=lam_anchor, lambda_saliency=lam_sal)
+            if aux_loss is not None:
+                loss = loss + aux_loss
+                for k, v in aux_parts.items():
+                    agg[k] += v
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), clip)
             opt.step()
@@ -300,6 +335,14 @@ def main():
                "val_loss_dof": vloss["dof"], "val_loss_total": vloss["total"],
                "existence": ex,
                "val_per_type_recall": per_type}
+        if entity_head:
+            rec["train_loss_anchor"] = round(agg["anchor"] / max(nseen, 1), 4)
+            rec["train_loss_saliency"] = round(agg["saliency"] / max(nseen, 1), 4)
+            # fraction of anchored joints whose target cell survived top-k.
+            # WATCH THIS: if it stays low the anchor loss trains on a biased
+            # subset -- raise entity_topk or lambda_saliency.
+            rec["anchor_coverage"] = round(agg["coverage"] / max(nseen, 1), 3)
+            rec["entity_gate"] = round(float(model.entity_type.gate.detach()), 4)
         print(json.dumps(rec))
         with open(log, "a") as f:
             f.write(json.dumps(rec) + "\n")
