@@ -175,6 +175,10 @@ def main():
                     help="override train.focal_gamma (0=weighted CE, >0=focal loss)")
     ap.add_argument("--patience", type=int, default=None,
                     help="override train.early_stop_patience (0=off)")
+    ap.add_argument("--early-stop-metric", choices=["f1", "loss"], default=None,
+                    help="what patience watches: val existence F1 (default) or val_loss_total")
+    ap.add_argument("--model-seed", type=int, default=None,
+                    help="weight-init seed; train/val split stays on train.seed")
     ap.add_argument("--type-head", choices=["pooled", "entity"], default=None,
                     help="pooled = Revision A baseline; entity = cross-body "
                          "entity attention + anchor supervision on the TYPE head")
@@ -198,6 +202,10 @@ def main():
         tc["focal_gamma"] = args.focal_gamma
     if args.patience is not None:
         tc["early_stop_patience"] = args.patience
+    if args.early_stop_metric is not None:
+        tc["early_stop_metric"] = args.early_stop_metric
+    if args.model_seed is not None:
+        tc["model_seed"] = args.model_seed
     if args.type_head is not None:
         cfg["model"]["entity_type_head"] = (args.type_head == "entity")
     if args.lambda_anchor is not None:
@@ -205,7 +213,15 @@ def main():
     if args.lambda_saliency is not None:
         tc["lambda_saliency"] = args.lambda_saliency
     device = tc["device"] if torch.cuda.is_available() else "cpu"
-    torch.manual_seed(tc["seed"])
+    # Two SEPARATE seeds. tc["seed"] carves the train/val split; model_seed drives
+    # weight initialisation. Varying one knob alone means a multi-seed study
+    # measures initialisation variance ONLY, holding the data partition fixed --
+    # otherwise the spread mixes init noise with split noise and is uninterpretable.
+    # Defaults to tc["seed"], so existing configs behave exactly as before.
+    model_seed = int(tc.get("model_seed", tc["seed"]))
+    torch.manual_seed(model_seed)
+    if model_seed != tc["seed"]:
+        print(f"[seed] split={tc['seed']}  model_init={model_seed}")
 
     asm_dir = ROOT / cfg["paths"]["cache_assembly"]
     split_json = cfg["paths"].get("split_json", "")
@@ -265,8 +281,11 @@ def main():
     patience = int(tc.get("early_stop_patience", 0))    # 0 = off; N = stop after N no-improve
     if focal_gamma > 0:
         print(f"[mode] FOCAL type loss (gamma={focal_gamma})")
+    es_metric = str(tc.get("early_stop_metric", "f1")).lower()
     if patience > 0:
-        print(f"[mode] EARLY STOPPING on val_loss_total (patience={patience})")
+        print(f"[mode] EARLY STOPPING on "
+              f"val_{'existence_F1' if es_metric == 'f1' else 'loss_total'} "
+              f"(patience={patience})")
     # --- entity-level type head (Revision B) ---
     entity_head = bool(cfg["model"].get("entity_type_head", False))
     lam_anchor = float(tc.get("lambda_anchor", 0.5))
@@ -288,7 +307,8 @@ def main():
     ckpt_dir.mkdir(parents=True, exist_ok=True)
     log = ckpt_dir / f"train_log_{suffix}.jsonl"
     best_f1 = -1.0
-    best_val_loss = float("inf")
+    best_es = -float("inf") \
+        if str(tc.get("early_stop_metric", "f1")).lower() == "f1" else float("inf")
     no_improve = 0
     best_path = ckpt_dir / f"best_{suffix}.pt"
     print(f"[run] tag={suffix}  ->  {best_path.name}, {log.name}")
@@ -352,15 +372,32 @@ def main():
             torch.save(model.state_dict(), best_path)
             print(f"  [checkpoint] new best F1={best_f1:.3f} -> {best_path.name}")
 
-        # early stopping on val total loss (patience-based; adapts per run)
+        # Early stopping. THE METRIC MATTERS FOR ABLATIONS.
+        # val_loss_total sums existence + type + DOF. The type term diverges early
+        # from overfitting while existence F1 is still climbing, so loss-based
+        # patience truncates runs mid-improvement -- and at a DIFFERENT epoch for
+        # each arm, because focal loss reshapes the loss landscape. Measured on the
+        # 5-arm ladder: arms stopped at epochs 11/11/20/14/16, so an arm-to-arm F1
+        # difference partly reflected "when did stopping fire", not model quality.
+        # Default is therefore the reported metric itself, val existence F1.
         if patience > 0:
-            if vloss["total"] < best_val_loss - 1e-4:
-                best_val_loss = vloss["total"]; no_improve = 0
+            if es_metric == "f1":
+                improved = ex["exist_F1"] > best_es + 1e-4
+                if improved:
+                    best_es = ex["exist_F1"]
+                label = "val_existence_F1"
+            else:
+                improved = vloss["total"] < best_es - 1e-4
+                if improved:
+                    best_es = vloss["total"]
+                label = "val_loss_total"
+            if improved:
+                no_improve = 0
             else:
                 no_improve += 1
                 if no_improve >= patience:
-                    print(f"  [early stop] val_loss_total no improvement for {patience} "
-                          f"epochs (best={best_val_loss:.3f}); stopping at epoch {ep}.")
+                    print(f"  [early stop] {label} no improvement for {patience} "
+                          f"epochs (best={best_es:.3f}); stopping at epoch {ep}.")
                     break
 
     print(f"[done] best val existence F1 = {best_f1:.3f}  ({best_path})")
