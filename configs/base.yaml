@@ -95,3 +95,12 @@ train:
   seed: 42
   device: "cuda"            # falls back to cpu automatically
   grad_clip: 5.0
+
+  # what early-stopping patience watches. "f1" = val existence F1 (the reported
+  # metric); "loss" = val_loss_total (old behaviour, biases ablation comparisons
+  # because each arm's loss minimum falls at a different epoch).
+  early_stop_metric: f1
+  # weight-init seed. train.seed still carves the train/val split, so varying
+  # model_seed alone isolates initialisation variance for the multi-seed study.
+  model_seed: 42
+  
